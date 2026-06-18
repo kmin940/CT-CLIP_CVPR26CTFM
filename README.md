@@ -1,11 +1,60 @@
 # CT-CLIP
-Welcome to the official repository of CT-CLIP, a pioneering work in 3D medical imaging with a particular focus on chest CT volumes. CT-CLIP provides an open-source codebase and pre-trained models, all freely accessible to researchers. CT-CLIP is also utilized to develop a cutting-edge visual-language chat model, [CT-CHAT](https://github.com/ibrahimethemhamamci/CT-CHAT), designed specifically for 3D chest CT volumes. You can access the training dataset (CT-RATE) consisting of chest CT volumes paired with radiology text reports via the [HuggingFace repository](https://huggingface.co/datasets/ibrahimhamamci/CT-RATE).
+This repository is based on the official repository [CT-CLIP](https://github.com/ibrahimethemhamamci/CT-CLIP) for linear probing CT-CLIP model for [CVPR 2026 CTFM challenge](https://www.codabench.org/competitions/12650/).
 
 
 <p align="center">
   <img src="figures/CT-CLIP.png" width="100%">
 </p>
 
+## Building the feature-extraction image (`ctclip_lp.tar.gz`)
+
+**fully offline**. The
+`Dockerfile` `COPY`s the whole repo and bakes in the model weights, so both the
+checkpoint and the text encoder must already be present at the repo root before you build.
+
+- **Prerequisites**: Docker, and the `huggingface_hub` CLI for the downloads below
+  (`pip install -U "huggingface_hub[cli]"`). The build pulls a CUDA base image + pip
+  packages over the network; producing the tarball needs ~7 GB of free disk.
+
+- **1. Download the CT-CLIP checkpoint into `checkpoints/`** — the CLIP (CTViT + text)
+  weights. From the CT-RATE HuggingFace dataset (gated — accept the terms and
+  `huggingface-cli login` first):
+  ```bash
+  huggingface-cli download ibrahimhamamci/CT-RATE \
+      models/CT-CLIP-Related/CT-CLIP_v2.pt \
+      --repo-type dataset --local-dir .
+  mkdir -p checkpoints && mv models/CT-CLIP-Related/CT-CLIP_v2.pt checkpoints/
+  ```
+  Direct link: <https://huggingface.co/datasets/ibrahimhamamci/CT-RATE/blob/main/models/CT-CLIP-Related/CT-CLIP_v2.pt>
+  → final path must be `checkpoints/CT-CLIP_v2.pt`.
+
+- **2. Stage the offline text encoder into `hf_cache/`** — CT-CLIP's text branch loads
+  `microsoft/BiomedVLP-CXR-BERT-specialized`; baking it lets the container skip all
+  network access at run time (`TRANSFORMERS_OFFLINE=1`):
+  ```bash
+  HF_HOME="$(pwd)/hf_cache" huggingface-cli download microsoft/BiomedVLP-CXR-BERT-specialized
+  ```
+  This populates `hf_cache/hub/models--microsoft--BiomedVLP-CXR-BERT-specialized/`.
+
+- **3. Build the image** (`.dockerignore` keeps the context lean but intentionally keeps
+  `checkpoints/` and `hf_cache/`):
+  ```bash
+  docker build -f Dockerfile -t ctclip_lp .
+  ```
+
+- **4. Save + compress** to produce the deliverable:
+  ```bash
+  docker save ctclip_lp | gzip > ctclip_lp.tar.gz
+  ```
+
+- **Load & run elsewhere** — `docker load < ctclip_lp.tar.gz`, then mount input/output
+  dirs and run the extractor (checkpoint is baked at `/opt/app/checkpoints/CT-CLIP_v2.pt`):
+  ```bash
+  docker run --gpus all \
+      -v /path/to/niftis:/workspace/inputs \
+      -v /path/to/out:/workspace/outputs \
+      ctclip_lp ./extract_feat_LP.sh
+  ```
 
 
 ## Requirements

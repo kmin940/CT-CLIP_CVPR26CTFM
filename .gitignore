@@ -1,0 +1,16 @@
+# Hidden directories (.venv, .claude, etc.)
+.*/
+
+# Local AI session log — keep out of the public repo
+CLAUDE_LOG.md
+
+# Large, reproducible artifacts — regenerate via the README "Building the
+# feature-extraction image" steps (downloaded weights + built/saved image).
+/checkpoints/
+/hf_cache/
+ctclip_lp.tar.gz
+
+# Python build artifacts
+**/__pycache__/
+*.py[cod]
+**/*.egg-info/

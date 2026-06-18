@@ -594,6 +594,9 @@ class CTCLIP(nn.Module):
         path = Path(path)
         assert path.exists()
         pt = torch.load(str(path))
+        # Filter out unexpected keys (e.g. position_ids buffer from older checkpoints)
+        model_keys = set(self.state_dict().keys())
+        pt = {k: v for k, v in pt.items() if k in model_keys}
         self.load_state_dict(pt)
 
     def tokenize(self, prompt):

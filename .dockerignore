@@ -1,0 +1,24 @@
+# Keep the build context (and resulting image) lean.
+# NOTE: checkpoints/ and hf_cache/ are intentionally NOT ignored — they are
+# baked into the image so feature extraction runs fully offline.
+
+.git
+.gitignore
+.venv
+.claude
+CLAUDE_LOG.md
+figures
+
+# Python caches / build artifacts
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/*.egg-info/
+
+# Packaged images / large outputs that must never enter the build context
+*.tar.gz
+output*/
+results*/
+features_*/
+
+.DS_Store
