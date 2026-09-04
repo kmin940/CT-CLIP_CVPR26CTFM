@@ -410,6 +410,7 @@ class CTCLIP(nn.Module):
             *,
             image_encoder = None,
             text_encoder = None,
+            image_only = False,
             dim_text = 512,
             dim_image = 512,
             dim_latent = 512,
@@ -473,7 +474,13 @@ class CTCLIP(nn.Module):
 
         assert not (text_causal_mask and not exists(text_eos_id)), 'text EOS token id must be given if using causal mask in text transformer'
 
-        if exists(text_encoder):
+        # image_only: build the visual branch alone, for callers that only ever
+        # use forward_image() (e.g. offline feature extraction). Dropping the
+        # text tower also drops the checkpoint's text_transformer.* keys in
+        # load(), so the strict load still succeeds. Default False = unchanged.
+        if image_only:
+            self.text_transformer = None
+        elif exists(text_encoder):
             self.text_transformer = text_encoder
         else:
             self.text_transformer = TextTransformer(
@@ -582,7 +589,8 @@ class CTCLIP(nn.Module):
 
         self.multiview_loss_weight = multiview_loss_weight
 
-        self.tokenizer= BertTokenizer.from_pretrained('microsoft/BiomedVLP-CXR-BERT-specialized',do_lower_case=True)
+        # Skipped under image_only so no HuggingFace download/cache is needed.
+        self.tokenizer= None if image_only else BertTokenizer.from_pretrained('microsoft/BiomedVLP-CXR-BERT-specialized',do_lower_case=True)
 
     def state_dict(self, *args, **kwargs):
         return super().state_dict(*args, **kwargs)
@@ -614,6 +622,57 @@ class CTCLIP(nn.Module):
         text_embeddings = self.text_transformer.embeddings(input_ids = input_ids, token_type_ids = token_type_ids)
         return text_embeddings
 
+    def forward_image(
+            self,
+            image,
+            return_encodings = False
+    ):
+        """
+        Image branch of forward(). need no text, tokenizer or text encoder.
+
+        Returns (image_latents, enc_image_send) -- the 2nd and 3rd elements of
+        forward(..., return_latents = True). With extra_latent_projection set it
+        returns (image_latents, image_latents_extra, enc_image_send).
+        """
+
+        enc_image= self.visual_transformer(image, return_encoded_tokens=True)  # in (B,1,240,480,480) b c f h w -> out (B,24,24,24,512) b t h w d
+
+        global h_r, w_r, z_r
+        h_r, w_r, z_r = enc_image.shape[1], enc_image.shape[2], enc_image.shape[3]  # (t,h,w) = (24,24,24); names are misleading, h_r actually holds t
+
+        enc_image_send = enc_image  # (B,24,24,24,512) full token grid kept for downstream spatial use
+
+        enc_image = torch.mean(enc_image, dim=1)  # avg-pool axial/slice axis t: (B,24,24,24,512) -> (B,24,24,512)
+
+        enc_image = enc_image.view(enc_image.shape[0], -1)  # (B,24,24,512) -> (B, 294912) == dim_image
+
+        if return_encodings:
+            return enc_image  # (B, 294912)
+
+        # depending on whether to do fine-grained CLIP or not, select either all tokens, or CLS tokens only
+
+        if self.use_all_token_embeds:
+            assert enc_image.ndim == 3, 'encoded image must have 3 dimensions (batch, seq [height x width], features)'  # unreachable: view() above made enc_image 2-D
+            image_embeds = enc_image[:, 1:] if self.visual_has_cls_token else enc_image
+        else:
+            image_embeds = enc_image[:, :] if enc_image.ndim == 3 else enc_image  # (B, 294912)
+
+        # project to latents
+
+        image_latents = self.to_visual_latent(image_embeds)  # Linear(294912, 512): (B, 294912) -> (B, 512)
+
+        image_latents = l2norm(image_latents)  # (B, 512) unit-norm
+
+        # calculate another set of latents for image to text (vs text to image)
+        # proposed by CLOOB
+
+        if self.extra_latent_projection:
+            image_latents_extra = self.to_visual_latent_extra(image_embeds)
+            image_latents_extra = l2norm(image_latents_extra)
+            return image_latents, image_latents_extra, enc_image_send
+
+        return image_latents, enc_image_send
+
     def forward(
             self,
             text,
@@ -628,11 +687,11 @@ class CTCLIP(nn.Module):
             aug_text = None,                # augmented text (for multiview)
             aug_image = None                # augmented image (for multiview)
     ):
-        b, device = text.input_ids.shape[0], device
+        b, device = text.input_ids.shape[0], device  # text.input_ids (B, 512); image (B,1,240,480,480) b c f h w
 
         # derive text mask
 
-        text_mask =text.attention_mask
+        text_mask =text.attention_mask  # (B, 512)
 
         # ssl
 
@@ -685,8 +744,8 @@ class CTCLIP(nn.Module):
             text_args = (*text_args, text_mask)
 
 
-        text_embeddings = self.text_transformer(text.input_ids, attention_mask = text.attention_mask )
-        enc_text = text_embeddings[0]
+        text_embeddings = self.text_transformer(text.input_ids, attention_mask = text.attention_mask )  # BERT out: last_hidden_state (B, 512, 768)
+        enc_text = text_embeddings[0]  # (B, 512, 768) b n d_text
 
         # depending on whether text is using causal mask, post process, moving eos token to the first position
 
@@ -715,16 +774,16 @@ class CTCLIP(nn.Module):
             freeze = freeze_image_encoder
         )"""
 
-        enc_image= self.visual_transformer(image, return_encoded_tokens=True)
+        enc_image= self.visual_transformer(image, return_encoded_tokens=True)  # in (B,1,240,480,480) b c f h w -> out (B,24,24,24,512) b t h w d
 
         #print("This is visual encoding")
         global h_r, w_r, z_r
-        h_r, w_r, z_r = enc_image.shape[1], enc_image.shape[2], enc_image.shape[3]
+        h_r, w_r, z_r = enc_image.shape[1], enc_image.shape[2], enc_image.shape[3]  # (t,h,w) = (24,24,24); names are misleading, h_r actually holds t
 
         #enc_image, max_indices = torch.max(enc_image, dim=1)
-        enc_image_send = enc_image
+        enc_image_send = enc_image  # (B,24,24,24,512) full token grid kept for downstream spatial use
 
-        enc_image = torch.mean(enc_image, dim=1)
+        enc_image = torch.mean(enc_image, dim=1)  # avg-pool axial/slice axis t: (B,24,24,24,512) -> (B,24,24,512)
 
         #kernel_size = (enc_image.size(1), enc_image.size(2), enc_image.size(3))
 
@@ -740,38 +799,38 @@ class CTCLIP(nn.Module):
         print("test all pooling")
     
 
-        enc_image = enc_image.view(enc_image.shape[0], -1)
+        enc_image = enc_image.view(enc_image.shape[0], -1)  # (B,24,24,512) -> (B, 294912) == dim_image
 
        # print(enc_image.shape, flush=True)
 
         # early return of encodings, if needed (for DALL-E2)
 
         if return_encodings:
-            return enc_text, enc_image
+            return enc_text, enc_image  # (B, 512, 768), (B, 294912)
 
         # depending on whether to do fine-grained CLIP or not, select either all tokens, or CLS tokens only
 
         if self.use_all_token_embeds:
             assert enc_text.ndim == 3, 'encoded text must have 3 dimensions (batch, seq, features)'
-            assert enc_image.ndim == 3, 'encoded image must have 3 dimensions (batch, seq [height x width], features)'
+            assert enc_image.ndim == 3, 'encoded image must have 3 dimensions (batch, seq [height x width], features)'  # unreachable: view() above made enc_image 2-D
             text_embeds = enc_text[:, 1:] if self.text_has_cls_token else enc_text
             image_embeds = enc_image[:, 1:] if self.visual_has_cls_token else enc_image
         else:
-            text_embeds = enc_text[:, :] if enc_text.ndim == 3 else enc_text
-            image_embeds = enc_image[:, :] if enc_image.ndim == 3 else enc_image
+            text_embeds = enc_text[:, :] if enc_text.ndim == 3 else enc_text  # (B, 512, 768)
+            image_embeds = enc_image[:, :] if enc_image.ndim == 3 else enc_image  # (B, 294912), ndim==2 so passes through
 
         # project to latents
         #text_embeds = text_embeds.view(text_embeds.shape[0], -1)
-        text_embeds = text_embeds[:,0,:]
+        text_embeds = text_embeds[:,0,:]  # take [CLS]: (B, 512, 768) -> (B, 768)
 
         #text_embeds = torch.mean(text_embeds, dim=1)
-        text_latents = self.to_text_latent(text_embeds)
+        text_latents = self.to_text_latent(text_embeds)  # Linear(768, 512): (B, 768) -> (B, 512)
 
-        image_latents = self.to_visual_latent(image_embeds)
+        image_latents = self.to_visual_latent(image_embeds)  # Linear(294912, 512): (B, 294912) -> (B, 512)
 
 
 
-        text_latents, image_latents = map(l2norm, (text_latents, image_latents))
+        text_latents, image_latents = map(l2norm, (text_latents, image_latents))  # both (B, 512) unit-norm
 
 
 
@@ -782,37 +841,37 @@ class CTCLIP(nn.Module):
 
         text_latents_extra, image_latents_extra = text_latents, image_latents
         if self.extra_latent_projection:
-            text_latents_extra = self.to_text_latent_extra(text_embeds)
-            image_latents_extra = self.to_visual_latent_extra(image_embeds)
-            text_latents_extra, image_latents_extra = map(l2norm, (text_latents_extra, image_latents_extra))
+            text_latents_extra = self.to_text_latent_extra(text_embeds)  # (B, 768) -> (B, 512)
+            image_latents_extra = self.to_visual_latent_extra(image_embeds)  # (B, 294912) -> (B, 512)
+            text_latents_extra, image_latents_extra = map(l2norm, (text_latents_extra, image_latents_extra))  # both (B, 512)
 
         # whether to early return latents
 
         if return_latents:
             if self.extra_latent_projection:
-                return text_latents, image_latents, text_latents_extra, image_latents_extra
+                return text_latents, image_latents, text_latents_extra, image_latents_extra  # 4x (B, 512)
 
-            return text_latents, image_latents, enc_image_send
+            return text_latents, image_latents, enc_image_send  # (B,512), (B,512), (B,24,24,24,512)
 
         # get temperature
 
-        temp = self.temperature.exp()
+        temp = self.temperature.exp()  # scalar
 
         # early return, if needed
 
 
         if not return_loss and self.use_all_token_embeds:
             einsum_args = (text_latents_extra, image_latents_extra) if self.extra_latent_projection and not text_to_image else (text_latents, image_latents)
-            return einsum('b d, b i d -> b t i', *einsum_args) * temp
+            return einsum('b d, b i d -> b t i', *einsum_args) * temp  # fine-grained path, unused here (latents are 2-D)
 
         if not return_loss and not self.use_all_token_embeds:
             einsum_args = (text_latents_extra, image_latents_extra) if self.extra_latent_projection and not text_to_image else (text_latents, image_latents)
-            return einsum('b d, b d -> b', *einsum_args) * temp
+            return einsum('b d, b d -> b', *einsum_args) * temp  # per-sample cosine sim: (B,512),(B,512) -> (B,)
 
         # split out multiview dimension for text and images
 
-        text_latents = rearrange(text_latents, '(m b) ... -> m b ...', m = num_batch_texts)
-        image_latents = rearrange(image_latents, '(m b) ... -> m b ...', m = num_batch_images)
+        text_latents = rearrange(text_latents, '(m b) ... -> m b ...', m = num_batch_texts)  # (B, 512) -> (m, B/m, 512), m=1 without aug
+        image_latents = rearrange(image_latents, '(m b) ... -> m b ...', m = num_batch_images)  # (B, 512) -> (n, B/n, 512)
 
         if self.extra_latent_projection:
             text_latents_extra = rearrange(text_latents_extra, '(m b) ... -> m b ...', m = num_batch_texts)
@@ -845,23 +904,23 @@ class CTCLIP(nn.Module):
             masked_sim = sim_image_to_text.masked_fill(~image_to_text_mask, max_neg_value(sim_image_to_text.dtype))
             image_to_text = reduce(reduce(masked_sim, '... t i -> ... i', 'max'), '... i -> ...', 'mean')
         else:
-            text_to_image = einsum('m t d, n i d -> m n t i', text_latents, image_latents) * temp
-            image_to_text = rearrange(text_to_image, '... t i -> ... i t')
+            text_to_image = einsum('m t d, n i d -> m n t i', text_latents, image_latents) * temp  # (1,1,B,B) logits, t/i index batch here
+            image_to_text = rearrange(text_to_image, '... t i -> ... i t')  # (1,1,B,B) transposed
 
             if self.extra_latent_projection:
                 image_to_text = einsum('m t d, n i d -> m n i t', text_latents_extra, image_latents_extra) * temp
 
         # calculate loss
 
-        text_to_image = rearrange(text_to_image, 'm n ... -> (m n) ...')
-        image_to_text = rearrange(image_to_text, 'm n ... -> (m n) ...')
+        text_to_image = rearrange(text_to_image, 'm n ... -> (m n) ...')  # (1, B, B)
+        image_to_text = rearrange(image_to_text, 'm n ... -> (m n) ...')  # (1, B, B)
 
 
         # exponentiate
         text_to_image_exp, image_to_text_exp = map(torch.exp, (text_to_image, image_to_text))
 
         # numerators
-        text_to_image_pos, image_to_text_pos = map(matrix_diag, (text_to_image_exp, image_to_text_exp))
+        text_to_image_pos, image_to_text_pos = map(matrix_diag, (text_to_image_exp, image_to_text_exp))  # diagonal = positives: (1, B)
 
         # denominator
 
@@ -869,12 +928,12 @@ class CTCLIP(nn.Module):
             pos_mask = torch.eye(b, device = device, dtype = torch.bool)
             text_to_image_exp, image_to_text_exp = map(lambda t: t.masked_fill(pos_mask, 0.), (text_to_image_exp, image_to_text_exp))
 
-        text_to_image_denom, image_to_text_denom = map(lambda t: t.sum(dim = -1), (text_to_image_exp, image_to_text_exp))
+        text_to_image_denom, image_to_text_denom = map(lambda t: t.sum(dim = -1), (text_to_image_exp, image_to_text_exp))  # (1, B, B) -> (1, B)
 
         # loss
 
-        text_to_image_loss = (-log(text_to_image_pos) + log(text_to_image_denom)).mean(dim = -1)
-        image_to_text_loss = (-log(image_to_text_pos) + log(image_to_text_denom)).mean(dim = -1)
+        text_to_image_loss = (-log(text_to_image_pos) + log(text_to_image_denom)).mean(dim = -1)  # (1, B) -> (1,)
+        image_to_text_loss = (-log(image_to_text_pos) + log(image_to_text_denom)).mean(dim = -1)  # (1, B) -> (1,)
 
         # calculate CL loss
 
@@ -882,7 +941,7 @@ class CTCLIP(nn.Module):
 
         # get main CL loss vs multiview CL losses
 
-        cl_loss, multiview_cl_loss = cl_losses[0], cl_losses[1:]
+        cl_loss, multiview_cl_loss = cl_losses[0], cl_losses[1:]  # scalar, (0,) when not multiview
 
         # if no augmented text or images passed in, multiview loss weight is 0
 
@@ -901,4 +960,4 @@ class CTCLIP(nn.Module):
         if is_multiview:
             loss = loss + multiview_cl_loss.mean() * multiview_loss_weight
 
-        return loss
+        return loss  # scalar

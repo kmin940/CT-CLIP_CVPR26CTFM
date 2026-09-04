@@ -22,6 +22,14 @@ setup(
     "click",
     "appdirs",
     "attr",
-    "nltk"
+    "nltk",
+    # runtime imports in ct_clip/* that were previously undeclared
+    "accelerate",
+    "nibabel",
+    "numpy",
+    "pandas",
+    "tqdm",
+    "transformers",
+    "transformer_maskgit",
       ],
 )

@@ -4,6 +4,12 @@
 # Local AI session log — keep out of the public repo
 CLAUDE_LOG.md
 
+# Local extraction launchers
+extract_feat_alldiseases*.sh
+/src/feature_extraction/sanity_data_orientation
+/src/feature_extraction/extract_feat_LP_*.py
+/results*
+
 # Large, reproducible artifacts — regenerate via the README "Building the
 # feature-extraction image" steps (downloaded weights + built/saved image).
 /checkpoints/
@@ -14,3 +20,16 @@ ctclip_lp.tar.gz
 **/__pycache__/
 *.py[cod]
 **/*.egg-info/
+
+# Per-unit extraction logs
+/logs/
+
+# Local, per-dataset extraction launchers and LP variants (untracked on purpose)
+/src/feature_extraction/extract_feat_alldiseases.sh
+/src/feature_extraction/extract_feat_alldiseases2.sh
+/src/feature_extraction/extract_feat_alldiseases_COVID.sh
+/src/feature_extraction/extract_feat_alldiseases_LUNA.sh
+/src/feature_extraction/extract_feat_alldiseases_test.sh
+/src/feature_extraction/extract_feat_LP_before.py
+/src/feature_extraction/extract_feat_LP_Center.py
+/src/feature_extraction/extract_feat_LP_torchio.py

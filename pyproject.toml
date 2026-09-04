@@ -1,0 +1,96 @@
+# uv environment that reproduces the `Dockerfile` runtime on the host.
+#
+# Purpose: run the feature-extraction scripts under src/feature_extraction/
+# (e.g. extract_feat_alldiseases_MSWAL_train.sh) outside Docker and get
+# bit-identical embeddings to `docker run ctclip_lp ./extract_feat_LP.sh`.
+#
+# Every pin below is the version that `pip list` reports inside the built
+# ctclip_lp image, so the resolved host env matches the container package for
+# package. See README.md -> "Host environment with uv".
+#
+#   uv sync          # create .venv/ from uv.lock
+#   uv run src/feature_extraction/extract_feat_alldiseases_MSWAL_train.sh
+[project]
+name = "ctclip-cvpr26ctfm"
+version = "0.1.0"
+description = "CT-CLIP linear-probe feature extraction for the CVPR26 CTFM challenge"
+# The Docker base image (pytorch/pytorch:2.1.0-cuda11.8-cudnn8-runtime) ships
+# CPython 3.10.13; .python-version pins the same interpreter for uv.
+requires-python = ">=3.10,<3.11"
+
+dependencies = [
+  # --- from the base image (conda-installed there, pip-installed here) -------
+  # torch 2.1.0 built against CUDA 11.8, resolved from the PyTorch index below.
+  # 2.1.0 is compiled against NumPy 1.x, hence the numpy<2 pin further down.
+  "torch==2.1.0",
+  "torchvision==0.16.0",
+  "pillow==9.4.0",
+  "tqdm==4.65.0",
+
+  # --- pip install -e ./transformer_maskgit/ (CTViT image encoder) ----------
+  "accelerate==1.14.0",
+  "beartype==0.22.9",
+  "einops==0.8.2",
+  "ema-pytorch==0.8.3",
+  "opencv-python==5.0.0.93",
+  "sentencepiece==0.2.2",
+  "torchtyping==0.1.5",
+  "vector-quantize-pytorch==1.1.2",
+  "openpyxl==3.1.5",
+  "transformer-maskgit",
+
+  # --- pip install -e ./CT_CLIP/ (CTCLIP model) -----------------------------
+  "ftfy==6.3.1",
+  "regex==2026.9.3",
+  "XlsxWriter==3.2.9",
+  "matplotlib==3.10.9",
+  "seaborn==0.13.2",
+  "wilds==2.0.0",
+  "ImageNetV2_pytorch",
+  "click==8.5.0",
+  "appdirs==1.4.4",
+  "attr==0.3.2",
+  "nltk==3.10.3",
+  "pandas==2.3.3",
+  "ct-clip",
+
+  # --- Dockerfile: extra feature-extraction dependencies --------------------
+  "nibabel==5.4.2",
+  "h5py==3.16.0",
+  # transformers is pinned to 4.44.2 because torch is 2.1.0: transformers >=5.0
+  # hard-requires torch >=2.4 and otherwise disables its PyTorch backend.
+  "transformers==4.44.2",
+
+  # --- Dockerfile: numpy<2, installed last -----------------------------------
+  # torch 2.1.0 crashes with "RuntimeError: Numpy is not available" under
+  # numpy 2.x. Docker enforces this by ordering; uv enforces it by resolution.
+  "numpy==1.26.4",
+]
+
+[dependency-groups]
+# Optional: only needed to regenerate/inspect the container comparison.
+dev = []
+
+[tool.uv]
+# This repo is not itself an installable package; it only assembles the env.
+package = false
+
+# The Dockerfile installs numpy<2 as its LAST step, deliberately downgrading
+# under packages that declare numpy>=2 (opencv-python 5.0.0.93 does). pip
+# allows that inconsistency; uv's resolver would refuse it, so state it as an
+# override to land on the exact same package set the container runs.
+override-dependencies = ["numpy==1.26.4"]
+
+[[tool.uv.index]]
+name = "pytorch-cu118"
+url = "https://download.pytorch.org/whl/cu118"
+explicit = true
+
+[tool.uv.sources]
+# CUDA 11.8 wheels, matching the base image's torch build (torch.version.cuda == "11.8").
+torch = { index = "pytorch-cu118" }
+torchvision = { index = "pytorch-cu118" }
+# The two in-repo packages, installed editable exactly as the Dockerfile does.
+transformer-maskgit = { path = "transformer_maskgit", editable = true }
+ct-clip = { path = "CT_CLIP", editable = true }
+ImageNetV2_pytorch = { git = "https://github.com/modestyachts/ImageNetV2_pytorch.git" }
