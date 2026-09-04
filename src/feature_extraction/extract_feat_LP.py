@@ -167,18 +167,12 @@ def nii_to_tensor(path, mask_path=None, fg_labels=None):
     """
     nii_img = nib.load(str(path))
 
-    tilt = obliquity_deg(nii_img.affine)
-    if not np.isfinite(tilt) or tilt > OBLIQUE_TOL_DEG:
-        print(f"Warning: {path} is oblique ({tilt:.2f} deg from canonical axes); "
-              f"reorientation permutes/flips axes but does not deoblique.")
-
     # Standardize orientation to TARGET_AXCODES before touching the array, so axis 2 is always superior/inferior and axes 0/1 are always in-plane.
     nii_img = reorient_to_target(nii_img)
     img_data = nii_img.get_fdata().astype(np.float32)
     # nibabel's get_fdata() already applies scl_slope / scl_inter; do not re-apply.
 
-    # Spacing comes from the reoriented affine, not the original header pixdim:
-    # Axes are now (L, P, S).
+    # Spacing comes from the reoriented affine, not the original header pixdim. Axes are now (L, P, S).
     l_spacing, p_spacing, s_spacing = (
         float(v) for v in nib.affines.voxel_sizes(nii_img.affine)
     )
@@ -198,19 +192,14 @@ def nii_to_tensor(path, mask_path=None, fg_labels=None):
         mask_data_orig_dhw = mask_data_orig.transpose(2, 0, 1)
 
     # Resample to target spacing (image: trilinear; mask: nearest)
-    # current spacing follows the (D, H, W) = (S, L, P) order set by the
-    # transpose above, so each anatomical axis is scaled by its own spacing.
     current = (s_spacing, l_spacing, p_spacing)
     target = (1.5, 0.75, 0.75)
 
-    # HU clipping, BEFORE resampling. CT-CLIP's own scripts/data.py clips after
-    # resampling; clipping first stops out-of-range voxels (metal at +3000 HU,
-    # air/padding below -1000) from bleeding into their neighbours through the
-    # trilinear interpolation, so the resampled volume is a blend of in-range
-    # values only.
+    # HU clipping
     img_data = np.clip(img_data, -1000, 1000)
 
     img_tensor = torch.tensor(img_data).unsqueeze(0).unsqueeze(0).float()
+    # resample
     img_data = resize_array(img_tensor, current, target)[0][0]
 
     mask_resampled = None
