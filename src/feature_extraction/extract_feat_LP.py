@@ -138,8 +138,8 @@ def nii_to_tensor(path, mask_path=None, fg_labels=None):
     Preprocessing follows CT-CLIP's data_inference_nii.py pipeline:
       1. Load NIfTI, reorient to TARGET_AXCODES (LPS), read spacing from the
          reoriented affine
-      2. Resample to target spacing (1.5mm Z, 0.75mm XY)
-      3. Apply HU clipping [-1000, 1000]
+      2. Apply HU clipping [-1000, 1000]
+      3. Resample to target spacing (1.5mm Z, 0.75mm XY)
       4. Normalize by dividing by 1000 -> [-1, 1]
       5. Crop/pad to 480x480x240 around mask ROI (or image center if no mask)
       6. Permute to (D, H, W) and add channel dim -> (1, 1, D, H, W)
@@ -179,11 +179,10 @@ def nii_to_tensor(path, mask_path=None, fg_labels=None):
     current = (s_spacing, l_spacing, p_spacing)
     target = (1.5, 0.75, 0.75)
 
+    img_data = np.clip(img_data, -1000, 1000)
+
     img_tensor = torch.tensor(img_data).unsqueeze(0).unsqueeze(0).float()
     img_data = resize_array(img_tensor, current, target)[0][0]
-
-    # HU clipping, after resampling (matches scripts/data.py ordering)
-    img_data = np.clip(img_data, -1000, 1000)
 
     mask_resampled = None
     if mask_data_orig is not None:

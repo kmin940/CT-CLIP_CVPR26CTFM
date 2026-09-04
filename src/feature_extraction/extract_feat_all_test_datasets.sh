@@ -31,9 +31,6 @@
 # Env:
 #   GPUS="0 1"       GPU indices to spread the queue over
 #   JOBS_PER_GPU=4   concurrent units per GPU
-#   CTRATE_SHARDS=4  split CT-RATE into this many units (its volumes average
-#                    ~195 MB gzipped vs ~50 MB elsewhere, so one worker runs it
-#                    at ~6.5 s/volume against ~1.5 s for the other datasets)
 #   RESULTS_ROOT     output tree, passed through to every unit
 #                    (default: the scripts' own ${REPO_ROOT}/results)
 #   LOG_DIR          per-unit logs (default: ${REPO_ROOT}/logs/feature_extraction/<ts>)
@@ -51,7 +48,6 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 read -r -a GPU_LIST <<< "${GPUS:-0 1}"
 JOBS_PER_GPU="${JOBS_PER_GPU:-4}"
-CTRATE_SHARDS="${CTRATE_SHARDS:-4}"
 DRYRUN="${DRYRUN:-0}"
 LOG_DIR="${LOG_DIR:-${REPO_ROOT}/logs/feature_extraction/$(date +%Y%m%d_%H%M%S)}"
 
@@ -77,12 +73,8 @@ units+=("MSWAL_train|extract_feat_alldiseases_MSWAL_train.sh|-|-")
 units+=("MSWAL_test|extract_feat_alldiseases_MSWAL.sh|-|-")
 units+=("Gaozb_lung_part1|extract_feat_alldiseases_Gaozb_lung.sh|-|-")
 units+=("autoPET|extract_feat_alldiseases_autoPET.sh|-|-")
-# CT-RATE: 1616 whole-image volumes, one shared embeddings set for all 18
-# targets, split into CTRATE_SHARDS units. The shards stride the file list, so
-# together they write exactly the .h5 files a single worker would.
-for (( sh = 0; sh < CTRATE_SHARDS; sh++ )); do
-    units+=("CT-RATE/shard${sh}|extract_feat_alldiseases_CTRATE.sh|-|NUM_SHARDS=${CTRATE_SHARDS} SHARD=${sh}")
-done
+# CT-RATE: 1616 whole-image volumes, one shared embeddings set for all 18 targets.
+units+=("CT-RATE|extract_feat_alldiseases_CTRATE.sh|-|-")
 
 echo "============================================================"
 echo "GPUs:         ${GPU_LIST[*]}  (jobs/gpu=${JOBS_PER_GPU}, max concurrent=$(( ${#GPU_LIST[@]} * JOBS_PER_GPU )))"

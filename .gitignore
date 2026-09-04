@@ -9,6 +9,7 @@ extract_feat_alldiseases*.sh
 /src/feature_extraction/sanity_data_orientation
 /src/feature_extraction/extract_feat_LP_*.py
 /results*
+/src/analysis
 
 # Large, reproducible artifacts — regenerate via the README "Building the
 # feature-extraction image" steps (downloaded weights + built/saved image).
