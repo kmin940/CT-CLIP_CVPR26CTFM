@@ -23,22 +23,6 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # get_fdata() returns voxels in whatever order the file happens to store them.
 TARGET_AXCODES = ("L", "P", "S")
 
-# Max tilt (degrees) of an affine direction from its closest canonical axis.
-# Reorientation only permutes and flips axes -- it does NOT resample an oblique
-# volume upright, so beyond this tolerance the "closest axcode" is approximate.
-OBLIQUE_TOL_DEG = 5.0
-
-
-def obliquity_deg(affine):
-    """Largest angle between an affine direction column and its nearest world axis."""
-    dirs = affine[:3, :3]
-    norms = np.linalg.norm(dirs, axis=0)
-    if not np.all(np.isfinite(norms)) or np.any(norms == 0):
-        return float("nan")
-    unit = dirs / norms
-    cos_max = np.abs(unit).max(axis=0).clip(-1.0, 1.0)
-    return float(np.degrees(np.arccos(cos_max)).max())
-
 
 def reorient_to_target(img, axcodes=TARGET_AXCODES):
     """
@@ -154,8 +138,8 @@ def nii_to_tensor(path, mask_path=None, fg_labels=None):
     Preprocessing follows CT-CLIP's data_inference_nii.py pipeline:
       1. Load NIfTI, reorient to TARGET_AXCODES (LPS), read spacing from the
          reoriented affine
-      2. Apply HU clipping [-1000, 1000]
-      3. Resample to target spacing (1.5mm Z, 0.75mm XY)
+      2. Resample to target spacing (1.5mm Z, 0.75mm XY)
+      3. Apply HU clipping [-1000, 1000]
       4. Normalize by dividing by 1000 -> [-1, 1]
       5. Crop/pad to 480x480x240 around mask ROI (or image center if no mask)
       6. Permute to (D, H, W) and add channel dim -> (1, 1, D, H, W)
@@ -172,7 +156,8 @@ def nii_to_tensor(path, mask_path=None, fg_labels=None):
     img_data = nii_img.get_fdata().astype(np.float32)
     # nibabel's get_fdata() already applies scl_slope / scl_inter; do not re-apply.
 
-    # Spacing comes from the reoriented affine, not the original header pixdim. Axes are now (L, P, S).
+    # Spacing comes from the reoriented affine, not the original header pixdim:
+    # Axes are now (L, P, S).
     l_spacing, p_spacing, s_spacing = (
         float(v) for v in nib.affines.voxel_sizes(nii_img.affine)
     )
@@ -191,16 +176,14 @@ def nii_to_tensor(path, mask_path=None, fg_labels=None):
     if mask_data_orig is not None:
         mask_data_orig_dhw = mask_data_orig.transpose(2, 0, 1)
 
-    # Resample to target spacing (image: trilinear; mask: nearest)
     current = (s_spacing, l_spacing, p_spacing)
     target = (1.5, 0.75, 0.75)
 
-    # HU clipping
-    img_data = np.clip(img_data, -1000, 1000)
-
     img_tensor = torch.tensor(img_data).unsqueeze(0).unsqueeze(0).float()
-    # resample
     img_data = resize_array(img_tensor, current, target)[0][0]
+
+    # HU clipping, after resampling (matches scripts/data.py ordering)
+    img_data = np.clip(img_data, -1000, 1000)
 
     mask_resampled = None
     if mask_data_orig is not None:
@@ -319,14 +302,6 @@ if __name__ == "__main__":
     ap.add_argument("--fg_labels", type=int, nargs='+', default=None,
                     help='Foreground mask label(s) to use for ROI center '
                          '(e.g. --fg_labels 1). Defaults to all non-zero voxels.')
-    # Sharding only selects WHICH files this process handles -- it does not touch
-    # preprocessing or the forward pass, so N shards write exactly the .h5 files
-    # one process would. Lets several workers share one output dir for datasets
-    # whose volumes are large enough that a single process is the bottleneck.
-    ap.add_argument("--num_shards", type=int, default=1,
-                    help='Split the input list into this many disjoint shards.')
-    ap.add_argument("--shard", type=int, default=0,
-                    help='Which shard (0-based) this process handles.')
 
     args = ap.parse_args()
 
@@ -342,14 +317,6 @@ if __name__ == "__main__":
     imgs_files = sorted([f for f in os.listdir(imgs_path) if f.endswith('.nii.gz')])
     if args.masks_path:
         imgs_files = [f for f in imgs_files if os.path.exists(os.path.join(args.masks_path, f))]
-
-    if args.num_shards > 1:
-        if not 0 <= args.shard < args.num_shards:
-            raise SystemExit(f"--shard must be in [0, {args.num_shards}), got {args.shard}")
-        # Stride, not contiguous blocks, so every shard gets a similar mix of
-        # volume sizes rather than one shard drawing all the large ones.
-        imgs_files = imgs_files[args.shard::args.num_shards]
-        print(f"Shard {args.shard}/{args.num_shards}: {len(imgs_files)} of the input volumes.")
 
     # Extract features
     processed_count = 0
